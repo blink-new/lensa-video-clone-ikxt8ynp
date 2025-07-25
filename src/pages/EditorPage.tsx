@@ -5,6 +5,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { blink } from '@/blink/client'
 import { 
   ArrowLeft, 
   Download, 
@@ -26,9 +27,12 @@ export default function EditorPage() {
   const navigate = useNavigate()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [uploadedImage, setUploadedImage] = useState<string | null>(null)
+  const [processedImage, setProcessedImage] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [progress, setProgress] = useState(0)
   const [activeFilter, setActiveFilter] = useState<string | null>(null)
+  const [processingType, setProcessingType] = useState<string>('')
+  const [showBefore, setShowBefore] = useState(false)
 
   useEffect(() => {
     const file = location.state?.uploadedFile
@@ -41,21 +45,114 @@ export default function EditorPage() {
     }
   }, [location.state])
 
+  const getFilterPrompt = (filterName: string): string => {
+    const prompts: Record<string, string> = {
+      'Vintage': 'vintage film look, warm tones, slight grain, retro aesthetic',
+      'Cinematic': 'cinematic color grading, dramatic lighting, movie-like atmosphere',
+      'Portrait': 'professional portrait enhancement, soft lighting, skin smoothing',
+      'Landscape': 'landscape photography enhancement, vibrant nature colors, HDR effect',
+      'B&W': 'black and white conversion, high contrast, artistic monochrome',
+      'Warm': 'warm color temperature, golden hour lighting, cozy atmosphere'
+    }
+    return prompts[filterName] || 'professional photo enhancement'
+  }
+
   const handleProcessing = async (type: string) => {
+    if (!uploadedImage) return
+    
     setIsProcessing(true)
     setProgress(0)
+    setProcessingType(type)
+    setActiveFilter(type)
     
-    // Simulate AI processing
-    const interval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval)
-          setIsProcessing(false)
-          return 100
-        }
-        return prev + 10
-      })
-    }, 200)
+    try {
+      // Upload image to storage first
+      const response = await fetch(uploadedImage)
+      const blob = await response.blob()
+      const file = new File([blob], 'image.jpg', { type: 'image/jpeg' })
+      
+      // Upload to Blink storage
+      const { publicUrl } = await blink.storage.upload(file, `editor/${Date.now()}.jpg`)
+      setProgress(30)
+      
+      let processedImageUrl: string
+      
+      if (type === 'retouch' || type === 'avatar') {
+        // Use AI image modification for face retouch and avatar generation
+        const { data } = await blink.ai.modifyImage({
+          images: [publicUrl],
+          prompt: type === 'retouch' 
+            ? 'Professional photo retouching: enhance facial features, smooth skin, brighten eyes, perfect lighting, high quality portrait'
+            : 'Transform into a stylized AI avatar with artistic effects, digital art style, vibrant colors',
+          quality: 'high',
+          n: 1
+        })
+        processedImageUrl = data[0].url
+        setProgress(80)
+      } else if (type === 'remove' || type === 'blur' || type === 'filter') {
+        // Use AI image generation for object removal, background blur, and filters
+        const { data } = await blink.ai.modifyImage({
+          images: [publicUrl],
+          prompt: type === 'remove' 
+            ? 'Remove unwanted objects and elements from the image, clean background, seamless editing'
+            : type === 'blur'
+            ? 'Add professional background blur with bokeh effect, shallow depth of field, focus on subject'
+            : 'Apply trendy Instagram-style filter with enhanced colors, professional photo editing',
+          quality: 'high',
+          n: 1
+        })
+        processedImageUrl = data[0].url
+        setProgress(80)
+      } else if (type.startsWith('filter-')) {
+        // Handle preset filters
+        const filterName = type.replace('filter-', '')
+        const { data } = await blink.ai.modifyImage({
+          images: [publicUrl],
+          prompt: `Apply ${filterName.toLowerCase()} filter effect: ${getFilterPrompt(filterName)}`,
+          quality: 'high',
+          n: 1
+        })
+        processedImageUrl = data[0].url
+        setProgress(80)
+      } else {
+        // Fallback to general enhancement
+        const { data } = await blink.ai.modifyImage({
+          images: [publicUrl],
+          prompt: 'Enhance image quality, improve lighting, increase sharpness, professional photo editing',
+          quality: 'high',
+          n: 1
+        })
+        processedImageUrl = data[0].url
+        setProgress(80)
+      }
+      
+      setProcessedImage(processedImageUrl)
+      setProgress(100)
+      
+    } catch (error) {
+      console.error('Processing failed:', error)
+      alert('Processing failed. Please try again.')
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+  
+  const handleDownload = async () => {
+    const imageToDownload = processedImage || uploadedImage
+    if (!imageToDownload) return
+    
+    const link = document.createElement('a')
+    link.href = imageToDownload
+    link.download = `lensa-edited-${Date.now()}.jpg`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+  
+  const handleReset = () => {
+    setProcessedImage(null)
+    setActiveFilter(null)
+    setShowBefore(false)
   }
 
   const filters = [
@@ -110,7 +207,12 @@ export default function EditorPage() {
                 <Redo2 className="w-4 h-4 mr-2" />
                 Redo
               </Button>
-              <Button size="sm" className="bg-gradient-to-r from-purple-600 to-blue-600">
+              <Button 
+                size="sm" 
+                className="bg-gradient-to-r from-purple-600 to-blue-600"
+                onClick={handleDownload}
+                disabled={!uploadedImage}
+              >
                 <Download className="w-4 h-4 mr-2" />
                 Download
               </Button>
@@ -141,10 +243,12 @@ export default function EditorPage() {
                     key={filter.id} 
                     className={`cursor-pointer transition-all hover:shadow-md ${
                       activeFilter === filter.id ? 'ring-2 ring-primary' : ''
-                    }`}
+                    } ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}`}
                     onClick={() => {
-                      setActiveFilter(filter.id)
-                      handleProcessing(filter.id)
+                      if (!isProcessing) {
+                        setActiveFilter(filter.id)
+                        handleProcessing(filter.id)
+                      }
                     }}
                   >
                     <CardContent className="p-4">
@@ -173,8 +277,14 @@ export default function EditorPage() {
                   {presetFilters.map((filter, index) => (
                     <Card 
                       key={index}
-                      className="cursor-pointer hover:shadow-md transition-all"
-                      onClick={() => handleProcessing(`filter-${filter.name}`)}
+                      className={`cursor-pointer hover:shadow-md transition-all ${
+                        isProcessing ? 'opacity-50 cursor-not-allowed' : ''
+                      }`}
+                      onClick={() => {
+                        if (!isProcessing) {
+                          handleProcessing(`filter-${filter.name}`)
+                        }
+                      }}
                     >
                       <CardContent className="p-3">
                         <div className={`w-full h-16 rounded-lg ${filter.preview} mb-2`}></div>
@@ -219,8 +329,8 @@ export default function EditorPage() {
             {uploadedImage ? (
               <div className="relative max-w-4xl max-h-full">
                 <img 
-                  src={uploadedImage} 
-                  alt="Uploaded" 
+                  src={showBefore ? uploadedImage : (processedImage || uploadedImage)} 
+                  alt={showBefore ? "Original" : "Processed"} 
                   className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
                 />
                 <canvas 
@@ -229,11 +339,32 @@ export default function EditorPage() {
                 />
                 
                 {/* Before/After Toggle */}
-                <div className="absolute top-4 left-4">
+                <div className="absolute top-4 left-4 flex space-x-2">
                   <Badge className="bg-white/90 text-gray-700">
-                    Original
+                    {showBefore ? "Original" : processedImage ? "Processed" : "Original"}
                   </Badge>
+                  {processedImage && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="bg-white/90"
+                      onClick={() => setShowBefore(!showBefore)}
+                    >
+                      {showBefore ? "Show After" : "Show Before"}
+                    </Button>
+                  )}
                 </div>
+                
+                {/* Processing Overlay */}
+                {isProcessing && (
+                  <div className="absolute inset-0 bg-black/20 rounded-lg flex items-center justify-center">
+                    <div className="bg-white/90 rounded-lg p-4 text-center">
+                      <Zap className="w-8 h-8 text-blue-600 animate-pulse mx-auto mb-2" />
+                      <p className="text-sm font-medium">Processing with AI...</p>
+                      <p className="text-xs text-gray-500">{processingType}</p>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-center">
@@ -263,13 +394,19 @@ export default function EditorPage() {
               </div>
               
               <div className="flex items-center space-x-2">
-                <Button variant="outline" size="sm">
+                <Button 
+                  variant="outline" 
+                  size="sm"
+                  onClick={handleReset}
+                  disabled={!processedImage}
+                >
                   Reset
                 </Button>
                 <Button 
                   size="sm"
                   className="bg-gradient-to-r from-purple-600 to-blue-600"
-                  disabled={!uploadedImage}
+                  disabled={!uploadedImage || isProcessing}
+                  onClick={() => handleProcessing('enhance')}
                 >
                   <Sparkles className="w-4 h-4 mr-2" />
                   Auto Enhance
